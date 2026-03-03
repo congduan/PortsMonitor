@@ -89,7 +89,8 @@ class ViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSour
         refreshButton.bezelStyle = .rounded
         refreshButton.target = self
         refreshButton.action = #selector(refreshButtonClicked)
-        refreshButton.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        refreshButton.translatesAutoresizingMaskIntoConstraints = false
+        refreshButton.widthAnchor.constraint(equalToConstant: 70).isActive = true
         buttonStackView.addArrangedSubview(refreshButton)
         
         portCountLabel.stringValue = "Ports: 0"
@@ -99,14 +100,16 @@ class ViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSour
         portCountLabel.textColor = .secondaryLabelColor
         portCountLabel.font = NSFont.systemFont(ofSize: 12)
         portCountLabel.alignment = .center
-        portCountLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        portCountLabel.translatesAutoresizingMaskIntoConstraints = false
+        portCountLabel.widthAnchor.constraint(equalToConstant: 70).isActive = true
         buttonStackView.addArrangedSubview(portCountLabel)
         
         monitorToggle.title = "Monitor"
         monitorToggle.setButtonType(.switch)
         monitorToggle.target = self
         monitorToggle.action = #selector(monitorToggleClicked)
-        monitorToggle.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        monitorToggle.translatesAutoresizingMaskIntoConstraints = false
+        monitorToggle.widthAnchor.constraint(equalToConstant: 80).isActive = true
         buttonStackView.addArrangedSubview(monitorToggle)
         
         killButton.title = "Kill"
@@ -114,7 +117,8 @@ class ViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSour
         killButton.target = self
         killButton.action = #selector(killButtonClicked)
         killButton.isEnabled = false
-        killButton.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        killButton.translatesAutoresizingMaskIntoConstraints = false
+        killButton.widthAnchor.constraint(equalToConstant: 50).isActive = true
         buttonStackView.addArrangedSubview(killButton)
         
         scrollView.frame = NSRect(x: margin, y: margin, width: view.bounds.width - margin * 2, height: view.bounds.height - toolbarHeight - margin * 2)
@@ -169,8 +173,19 @@ class ViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSour
         let selectedRow = tableView.selectedRow
         if selectedRow >= 0 && selectedRow < filteredPortInfos.count {
             let portInfo = filteredPortInfos[selectedRow]
-            killProcess(pid: portInfo.processID)
-            refreshPortDataAsync()
+            
+            let alert = NSAlert()
+            alert.messageText = "Confirm Kill"
+            alert.informativeText = "Are you sure you want to kill process \(portInfo.processName) (PID: \(portInfo.processID))?"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.addButton(withTitle: "Cancel")
+            
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                killProcess(pid: portInfo.processID)
+                refreshPortDataAsync()
+            }
         }
     }
     

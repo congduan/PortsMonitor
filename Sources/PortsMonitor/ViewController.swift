@@ -25,12 +25,18 @@ class ViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSour
     
     private var portInfos: [PortInfo] = []
     private var filteredPortInfos: [PortInfo] = []
+    private var portMonitoringTimer: Timer?
+    private var isMonitoringEnabled = false
     
     private let tableView = NSTableView()
     private let scrollView = NSScrollView()
     private let searchField = NSSearchField()
     private let refreshButton = NSButton()
     private let killButton = NSButton()
+    private let monitorToggle = NSButton()
+    private let portCountLabel = NSTextField()
+    private let toolbarContainer = NSView()
+    private let buttonStackView = NSStackView()
     
     override func loadView() {
         view = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
@@ -58,54 +64,98 @@ class ViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSour
     }
     
     private func setupUI() {
-        // Search field
-        searchField.frame = NSRect(x: 20, y: view.bounds.height - 40, width: view.bounds.width - 180, height: 25)
+        let toolbarHeight: CGFloat = 40
+        let margin: CGFloat = 16
+        let buttonSpacing: CGFloat = 8
+        
+        toolbarContainer.frame = NSRect(x: 0, y: view.bounds.height - toolbarHeight, width: view.bounds.width, height: toolbarHeight)
+        toolbarContainer.wantsLayer = true
+        toolbarContainer.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        view.addSubview(toolbarContainer)
+        
+        searchField.frame = NSRect(x: margin, y: 6, width: 200, height: 28)
         searchField.delegate = self
         searchField.placeholderString = "Search ports..."
-        view.addSubview(searchField)
+        toolbarContainer.addSubview(searchField)
         
-        // Refresh button
-        refreshButton.frame = NSRect(x: view.bounds.width - 150, y: view.bounds.height - 40, width: 65, height: 25)
+        buttonStackView.frame = NSRect(x: view.bounds.width - 400, y: 6, width: 384, height: 28)
+        buttonStackView.orientation = .horizontal
+        buttonStackView.alignment = .centerY
+        buttonStackView.spacing = buttonSpacing
+        buttonStackView.distribution = .fill
+        toolbarContainer.addSubview(buttonStackView)
+        
         refreshButton.title = "Refresh"
+        refreshButton.bezelStyle = .rounded
         refreshButton.target = self
         refreshButton.action = #selector(refreshButtonClicked)
-        view.addSubview(refreshButton)
+        refreshButton.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        buttonStackView.addArrangedSubview(refreshButton)
         
-        // Kill button
-        killButton.frame = NSRect(x: view.bounds.width - 80, y: view.bounds.height - 40, width: 65, height: 25)
+        portCountLabel.stringValue = "Ports: 0"
+        portCountLabel.isBordered = false
+        portCountLabel.isEditable = false
+        portCountLabel.drawsBackground = false
+        portCountLabel.textColor = .secondaryLabelColor
+        portCountLabel.font = NSFont.systemFont(ofSize: 12)
+        portCountLabel.alignment = .center
+        portCountLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        buttonStackView.addArrangedSubview(portCountLabel)
+        
+        monitorToggle.title = "Monitor"
+        monitorToggle.setButtonType(.switch)
+        monitorToggle.target = self
+        monitorToggle.action = #selector(monitorToggleClicked)
+        monitorToggle.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        buttonStackView.addArrangedSubview(monitorToggle)
+        
         killButton.title = "Kill"
+        killButton.bezelStyle = .rounded
         killButton.target = self
         killButton.action = #selector(killButtonClicked)
         killButton.isEnabled = false
-        view.addSubview(killButton)
+        killButton.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        buttonStackView.addArrangedSubview(killButton)
         
-        // Table view
-        scrollView.frame = NSRect(x: 20, y: 20, width: view.bounds.width - 40, height: view.bounds.height - 80)
+        scrollView.frame = NSRect(x: margin, y: margin, width: view.bounds.width - margin * 2, height: view.bounds.height - toolbarHeight - margin * 2)
         scrollView.autohidesScrollers = false
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.borderType = .bezelBorder
         view.addSubview(scrollView)
         
         tableView.frame = scrollView.bounds
         tableView.delegate = self
         tableView.dataSource = self
+        tableView.usesAlternatingRowBackgroundColors = true
+        tableView.gridStyleMask = .solidHorizontalGridLineMask
+        tableView.rowHeight = 24
         
         let portColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("port"))
         portColumn.title = "Port"
         portColumn.width = 80
+        portColumn.headerCell.alignment = .center
+        portColumn.minWidth = 60
         tableView.addTableColumn(portColumn)
         
         let protocolColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("protocol"))
         protocolColumn.title = "Protocol"
         protocolColumn.width = 80
+        protocolColumn.headerCell.alignment = .center
+        protocolColumn.minWidth = 60
         tableView.addTableColumn(protocolColumn)
         
         let processColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("process"))
         processColumn.title = "Process"
         processColumn.width = 200
+        processColumn.minWidth = 100
         tableView.addTableColumn(processColumn)
         
         let pidColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("pid"))
         pidColumn.title = "PID"
         pidColumn.width = 80
+        pidColumn.headerCell.alignment = .center
+        pidColumn.minWidth = 60
         tableView.addTableColumn(pidColumn)
         
         scrollView.documentView = tableView
@@ -124,16 +174,46 @@ class ViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSour
         }
     }
     
+    @objc private func monitorToggleClicked() {
+        isMonitoringEnabled = monitorToggle.state == .on
+        if isMonitoringEnabled {
+            startMonitoring()
+        } else {
+            stopMonitoring()
+        }
+    }
+    
+    private func startMonitoring() {
+        // Stop any existing timer
+        stopMonitoring()
+        
+        // Start new timer to refresh every 5 seconds
+        portMonitoringTimer = Timer.scheduledTimer(timeInterval: 5.0, target: self, selector: #selector(monitorPorts), userInfo: nil, repeats: true)
+        print("Port monitoring started")
+    }
+    
+    private func stopMonitoring() {
+        portMonitoringTimer?.invalidate()
+        portMonitoringTimer = nil
+        print("Port monitoring stopped")
+    }
+    
+    @objc private func monitorPorts() {
+        refreshPortDataAsync()
+    }
+    
     private func refreshPortDataAsync() {
         refreshButton.isEnabled = false
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let infos = Self.getPortInfo()
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
                 self.portInfos = infos
                 self.filteredPortInfos = infos
                 self.tableView.reloadData()
                 self.refreshButton.isEnabled = true
+                self.portCountLabel.stringValue = "Ports: \(infos.count)"
             }
         }
     }
@@ -236,16 +316,11 @@ class ViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSour
 
     
     private func killProcess(pid: Int) {
-        let task = Process()
-        task.launchPath = "/usr/bin/kill"
-        task.arguments = ["-9", "\(pid)"]
-        
-        do {
-            try task.run()
-            task.waitUntilExit()
+        let result = Darwin.kill(pid_t(pid), SIGKILL)
+        if result == 0 {
             print("Killed process \(pid)")
-        } catch {
-            print("Error killing process: \(error)")
+        } else {
+            print("Error killing process \(pid): \(errno)")
         }
     }
     
@@ -271,6 +346,73 @@ class ViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSour
         return nil
     }
     
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let portInfo = filteredPortInfos[row]
+        
+        let cellIdentifier = tableColumn?.identifier ?? NSUserInterfaceItemIdentifier("")
+        
+        // Create a container view for vertical centering
+        var cellView: NSTableCellView
+        
+        if let existingView = tableView.makeView(withIdentifier: cellIdentifier, owner: self) as? NSTableCellView {
+            cellView = existingView
+        } else {
+            cellView = NSTableCellView()
+            cellView.identifier = cellIdentifier
+            
+            let textField = NSTextField()
+            textField.isBordered = false
+            textField.isEditable = false
+            textField.drawsBackground = false
+            textField.lineBreakMode = .byTruncatingTail
+            textField.translatesAutoresizingMaskIntoConstraints = false
+            
+            cellView.addSubview(textField)
+            
+            // Set constraints for vertical centering
+            NSLayoutConstraint.activate([
+                textField.leadingAnchor.constraint(equalTo: cellView.leadingAnchor, constant: 8),
+                textField.trailingAnchor.constraint(equalTo: cellView.trailingAnchor, constant: -8),
+                textField.centerYAnchor.constraint(equalTo: cellView.centerYAnchor)
+            ])
+        }
+        
+        guard let textField = cellView.subviews.first as? NSTextField else {
+            return cellView
+        }
+        
+        let font = NSFont.systemFont(ofSize: 13)
+        textField.font = font
+        textField.alignment = .center
+        
+        let isSelected = tableView.selectedRowIndexes.contains(row)
+        
+        if cellIdentifier.rawValue == "port" {
+            textField.stringValue = "\(portInfo.port)"
+        } else if cellIdentifier.rawValue == "protocol" {
+            textField.stringValue = portInfo.protocolType
+        } else if cellIdentifier.rawValue == "process" {
+            textField.stringValue = portInfo.processName
+            textField.alignment = .left
+        } else if cellIdentifier.rawValue == "pid" {
+            textField.stringValue = "\(portInfo.processID)"
+        }
+        
+        if isSelected {
+            textField.textColor = .white
+            textField.backgroundColor = .selectedContentBackgroundColor
+        } else {
+            textField.textColor = .labelColor
+            textField.backgroundColor = .clear
+        }
+        
+        return cellView
+    }
+    
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        return 28
+    }
+    
     // MARK: - NSTableViewDelegate
     
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -294,6 +436,8 @@ class ViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSour
                 }
             }
             
+            // Sort by port number
+            filteredPortInfos.sort { $0.port < $1.port }
             tableView.reloadData()
         }
     }
@@ -306,16 +450,13 @@ class ViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSour
     }
     
     private func updateLayout() {
-        // Update search field frame
-        searchField.frame = NSRect(x: 20, y: view.bounds.height - 40, width: view.bounds.width - 180, height: 25)
+        let toolbarHeight: CGFloat = 40
+        let margin: CGFloat = 16
         
-        // Update refresh button frame
-        refreshButton.frame = NSRect(x: view.bounds.width - 150, y: view.bounds.height - 40, width: 65, height: 25)
+        toolbarContainer.frame = NSRect(x: 0, y: view.bounds.height - toolbarHeight, width: view.bounds.width, height: toolbarHeight)
         
-        // Update kill button frame
-        killButton.frame = NSRect(x: view.bounds.width - 80, y: view.bounds.height - 40, width: 65, height: 25)
+        buttonStackView.frame = NSRect(x: view.bounds.width - 400, y: 6, width: 384, height: 28)
         
-        // Update scroll view frame
-        scrollView.frame = NSRect(x: 20, y: 20, width: view.bounds.width - 40, height: view.bounds.height - 80)
+        scrollView.frame = NSRect(x: margin, y: margin, width: view.bounds.width - margin * 2, height: view.bounds.height - toolbarHeight - margin * 2)
     }
 }

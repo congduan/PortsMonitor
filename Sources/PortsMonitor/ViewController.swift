@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Darwin
+import Darwin.C
 
 
 class ViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSource, NSSearchFieldDelegate, NSWindowDelegate {
@@ -26,6 +27,7 @@ class ViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSour
     private var filteredPortInfos: [PortInfo] = []
     
     private let tableView = NSTableView()
+    private let scrollView = NSScrollView()
     private let searchField = NSSearchField()
     private let refreshButton = NSButton()
     private let killButton = NSButton()
@@ -78,7 +80,7 @@ class ViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSour
         view.addSubview(killButton)
         
         // Table view
-        let scrollView = NSScrollView(frame: NSRect(x: 20, y: 20, width: view.bounds.width - 40, height: view.bounds.height - 80))
+        scrollView.frame = NSRect(x: 20, y: 20, width: view.bounds.width - 40, height: view.bounds.height - 80)
         scrollView.autohidesScrollers = false
         view.addSubview(scrollView)
         
@@ -139,56 +141,96 @@ class ViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSour
     private nonisolated static func getPortInfo() -> [PortInfo] {
         var result: [PortInfo] = []
         
-        let task = Process()
-        task.launchPath = "/usr/sbin/lsof"
-        task.arguments = ["-i", "-P", "-n", "-sTCP:LISTEN", "-sTCP:ESTABLISHED"]
+        let bufferSize = proc_listallpids(nil, 0)
+        guard bufferSize > 0 else { return [] }
         
-        let pipe = Pipe()
-        task.standardOutput = pipe
+        var pids = [pid_t](repeating: 0, count: Int(bufferSize) / MemoryLayout<pid_t>.size)
+        let actualSize = proc_listallpids(&pids, bufferSize)
+        guard actualSize > 0 else { return [] }
         
-        do {
-            try task.run()
-            task.waitUntilExit()
+        let pidCount = Int(actualSize) / MemoryLayout<pid_t>.size
+        
+        for i in 0..<pidCount {
+            let pid = pids[i]
+            guard pid > 0 else { continue }
             
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                let lines = output.split(separator: "\n")
-                for line in lines {
-                    let parts = line.split(separator: " ", omittingEmptySubsequences: true)
-                    guard parts.count >= 9 else { continue }
-                    
-                    let processName = String(parts[0])
-                    guard let processID = Int(parts[1]), processID > 0 else { continue }
-                    
-                    var protocolType = "TCP"
-                    let protoField = String(parts[7])
-                    if protoField.hasPrefix("UDP") {
-                        protocolType = "UDP"
-                    }
-                    
-                    let nameField = String(parts[8])
-                    
-                    var port: Int?
-                    if nameField.contains(":") {
-                        let components = nameField.split(separator: ":")
-                        if let lastComponent = components.last {
-                            let portStr = String(lastComponent)
-                            port = Int(portStr)
-                        }
-                    }
-                    
-                    guard let validPort = port, validPort > 0, validPort <= 65535 else { continue }
-                    
-                    result.append(PortInfo(port: validPort, processName: processName, processID: processID, protocolType: protocolType))
+            let processName = getProcessName(pid: pid)
+            
+            let fds = getProcessFDs(pid: pid)
+            for fd in fds {
+                if let portInfo = getSocketInfo(pid: pid, fd: fd, processName: processName) {
+                    result.append(portInfo)
                 }
             }
-        } catch {
-            print("Error running lsof: \(error)")
         }
         
         let uniqueResults = Array(Set(result))
         print("Found \(uniqueResults.count) ports")
         return uniqueResults.sorted { $0.port < $1.port }
+    }
+    
+    private nonisolated static func getProcessName(pid: pid_t) -> String {
+        let maxPathSize = 4096
+        var name = [CChar](repeating: 0, count: maxPathSize)
+        let length = proc_name(pid, &name, UInt32(maxPathSize))
+        if length > 0 {
+            return String(cString: name)
+        }
+        return "Unknown"
+    }
+    
+    private nonisolated static func getProcessFDs(pid: pid_t) -> [Int32] {
+        let size = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
+        guard size > 0 else { return [] }
+        
+        let fdCount = Int(size) / MemoryLayout<proc_fdinfo>.size
+        var fdInfos = [proc_fdinfo](repeating: proc_fdinfo(proc_fd: 0, proc_fdtype: 0), count: fdCount)
+        
+        let actualSize = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, &fdInfos, size)
+        guard actualSize > 0 else { return [] }
+        
+        var fds: [Int32] = []
+        let actualCount = Int(actualSize) / MemoryLayout<proc_fdinfo>.size
+        for i in 0..<actualCount {
+            if fdInfos[i].proc_fdtype == PROX_FDTYPE_SOCKET {
+                fds.append(fdInfos[i].proc_fd)
+            }
+        }
+        return fds
+    }
+    
+    private nonisolated static func getSocketInfo(pid: pid_t, fd: Int32, processName: String) -> PortInfo? {
+        var socketInfo = socket_fdinfo()
+        let size = proc_pidfdinfo(pid, fd, PROC_PIDFDSOCKETINFO, &socketInfo, Int32(MemoryLayout<socket_fdinfo>.size))
+        guard size > 0 else { return nil }
+        
+        let family = socketInfo.psi.soi_family
+        let kind = socketInfo.psi.soi_kind
+        
+        guard family == 2 || family == 30 else {
+            return nil
+        }
+        
+        var port: Int = 0
+        var protocolType = "TCP"
+        
+        if kind == 1 {
+            protocolType = "UDP"
+            let sin = socketInfo.psi.soi_proto.pri_in
+            let portValue = UInt16(truncatingIfNeeded: sin.insi_lport)
+            port = Int(UInt16(bigEndian: portValue))
+        } else if kind == 2 {
+            protocolType = "TCP"
+            let tcp = socketInfo.psi.soi_proto.pri_tcp
+            let portValue = UInt16(truncatingIfNeeded: tcp.tcpsi_ini.insi_lport)
+            port = Int(UInt16(bigEndian: portValue))
+        } else {
+            return nil
+        }
+        
+        guard port > 0 && port <= 65535 else { return nil }
+        
+        return PortInfo(port: port, processName: processName, processID: Int(pid), protocolType: protocolType)
     }
     
 
@@ -274,8 +316,6 @@ class ViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSour
         killButton.frame = NSRect(x: view.bounds.width - 80, y: view.bounds.height - 40, width: 65, height: 25)
         
         // Update scroll view frame
-        if let scrollView = tableView.superview as? NSScrollView {
-            scrollView.frame = NSRect(x: 20, y: 20, width: view.bounds.width - 40, height: view.bounds.height - 80)
-        }
+        scrollView.frame = NSRect(x: 20, y: 20, width: view.bounds.width - 40, height: view.bounds.height - 80)
     }
 }

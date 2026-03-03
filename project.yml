@@ -1,0 +1,27 @@
+name: PortsMonitor
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+    PRODUCT_NAME: PortsMonitor
+
+targets:
+  PortsMonitor:
+    type: application
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - path: Sources/PortsMonitor
+        excludes:
+          - Info.plist
+    info:
+      path: Sources/PortsMonitor/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.PortsMonitor
+        INFOPLIST_FILE: Sources/PortsMonitor/Info.plist
